@@ -121,7 +121,8 @@ int main(int argc, char**argv) {
 		recv_all(sessfd, &stub_size, sizeof(size_t));
 
 		// receive actual package
-		char stub[stub_size];
+		void *stub = malloc(stub_size);
+		// char stub[stub_size];
 		recv_all(sessfd, stub, stub_size);
 
 		// get messages and send replies to this client, until it goes away
@@ -135,6 +136,8 @@ int main(int argc, char**argv) {
 
 		// either client closed connection, or error
 		close(sessfd);
+		// clean up memory
+		free(stub);
 	}
 	
 	// fprintf(stderr, "server shutting down cleanly\n");

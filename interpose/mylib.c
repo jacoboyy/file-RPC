@@ -101,7 +101,7 @@ int open(const char *pathname, int flags, ...) {
 	int sockfd = connect2server();
 	// stub = type (int) + flags (int) + m (mode_t) + pathname (string)
 	size_t stub_size = 2 * sizeof(int) + sizeof(mode_t) + strlen(pathname) + 1;
-	char stub[stub_size];
+	void *stub = malloc(stub_size);
 	memcpy(stub, &type, sizeof(int));
 	memcpy(stub + sizeof(int), &flags, sizeof(int));
 	memcpy(stub + 2 * sizeof(int), &m, sizeof(mode_t));
@@ -120,6 +120,8 @@ int open(const char *pathname, int flags, ...) {
 
 	// close the connection socket
 	orig_close(sockfd);
+	// clean up memory
+	free(stub);
 
 	return fd;
 }
@@ -168,7 +170,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
 	int type = 2;
 	// stub = type (int) + fd (int) + count (size_t) + buf (count)
 	size_t stub_size = 2 * sizeof(int) + sizeof(size_t) + count;
-	char stub[stub_size];
+	void *stub = malloc(stub_size);
 
 	memcpy(stub, &type, sizeof(int));
 	memcpy(stub + sizeof(int), &fd, sizeof(int));
@@ -188,6 +190,8 @@ ssize_t write(int fd, const void *buf, size_t count) {
 
 	// close connection socket
 	orig_close(sockfd);
+	// clean up memory
+	free(stub);
 	
 	return write_size;
 }
