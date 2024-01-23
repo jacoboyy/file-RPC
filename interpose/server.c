@@ -8,11 +8,77 @@
 #include <unistd.h>
 #include <err.h>
 #include <stdbool.h>
+#include <sys/errno.h>
+#include <fcntl.h>
 
-#define MAXMSGLEN 100
+extern int errno;
+
+void send_all(int sockfd, void *buf, size_t buf_size) {
+	size_t total = 0;
+	while (total < buf_size) {
+		ssize_t cur = send(sockfd, buf + total, buf_size - total, 0);
+		if (cur < 0) err(1, 0);
+		total += cur;
+	}
+	// fprintf(stderr, "server sent %zu bytes\n", buf_size);
+}
+
+void recv_all(int sockfd, void *buf, size_t buf_size) {
+	size_t total = 0;
+	while (total < buf_size) {
+		ssize_t cur = recv(sockfd, buf + total, buf_size - total, 0);
+		if (cur < 0) err(1, 0);
+		total += cur;
+	}
+	// fprintf(stderr, "server received %zu bytes\n", buf_size);
+}
+
+void rpc_open(int sessfd, char* stub) {
+	int flags = *(int *)(stub + sizeof(int));
+	mode_t mode = *(mode_t *)(stub + 2 * sizeof(int));
+	char *pathname = stub + 2 * sizeof(int) + sizeof(mode_t);
+	
+	// perform a local open
+	int fd = open(pathname, flags, mode);
+	fprintf(stderr, "rpc_open file %s and fd is %d\n", pathname, fd);
+	// send back the file descriptor
+	send_all(sessfd, &fd, sizeof(int));
+	// send back errno on failure
+	if (fd < 0) send_all(sessfd, &errno, sizeof(int));
+}
+
+void rpc_close(int sessfd, char* stub) {
+	int fd = *(int *)(stub + sizeof(int));
+	fprintf(stderr, "rpc_close called for remote fd %d\n", fd);
+	// perform a local close
+	int res = close(fd);
+	// send back the result
+	send_all(sessfd, &res, sizeof(int));
+	// send back errno on failure
+	if (res < 0) {
+		send_all(sessfd, &errno, sizeof(int));
+		fprintf(stderr, "close fd %d failed!\n", fd);
+	} else {
+		fprintf(stderr, "close fd %d succeed!\n", fd);
+	}
+}
+
+void rpc_write(int sessfd, char* stub){
+	int fd = *(int *)(stub + sizeof(int));
+	size_t count = *(size_t *)(stub + 2 * sizeof(int));
+	// fprintf(stderr, "rpc_write %zu bytes to fd %d\n", count, fd);
+	void *buf = stub + 2 * sizeof(int) + sizeof(size_t);
+
+	// perform a local write
+	ssize_t res = write(fd, buf, count);
+
+	// send back results
+	send_all(sessfd, &res, sizeof(ssize_t));
+	// send back errno on failure
+	if (res < 0) send_all(sessfd, &errno, sizeof(int));
+}
 
 int main(int argc, char**argv) {
-	char buf[MAXMSGLEN+1];
 	char *serverport;
 	unsigned short port;
 	int sockfd, sessfd, rv;
@@ -50,18 +116,28 @@ int main(int argc, char**argv) {
 		sessfd = accept(sockfd, (struct sockaddr *)&cli, &sa_size);
 		if (sessfd<0) err(1,0);
 		
+		// the first package will alwasy be the package size
+		size_t stub_size;
+		recv_all(sessfd, &stub_size, sizeof(size_t));
+
+		// receive actual package
+		char stub[stub_size];
+		recv_all(sessfd, stub, stub_size);
+
 		// get messages and send replies to this client, until it goes away
-		while ( (rv=recv(sessfd, buf, MAXMSGLEN, 0)) > 0) {
-			buf[rv]=0;		// null terminate string to print
-			printf("%s\n", buf);
-		}
+		int type = *(int *)stub;
+		if (type == 0)
+			rpc_open(sessfd, stub);
+		else if (type == 1)
+			rpc_close(sessfd, stub);
+		else if (type == 2)
+			rpc_write(sessfd, stub);
 
 		// either client closed connection, or error
-		if (rv<0) err(1,0);
 		close(sessfd);
 	}
 	
-	fprintf(stderr, "server shutting down cleanly\n");
+	// fprintf(stderr, "server shutting down cleanly\n");
 	// close socket
 	close(sockfd);
 
