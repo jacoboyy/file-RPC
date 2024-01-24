@@ -12,6 +12,7 @@
 #include <fcntl.h>
 
 extern int errno;
+int server_sessfd; /* global variable for connection socket */
 
 void send_all(int sockfd, void *buf, size_t buf_size) {
 	size_t total = 0;
@@ -20,7 +21,6 @@ void send_all(int sockfd, void *buf, size_t buf_size) {
 		if (cur < 0) err(1, 0);
 		total += cur;
 	}
-	// fprintf(stderr, "server sent %zu bytes\n", buf_size);
 }
 
 void recv_all(int sockfd, void *buf, size_t buf_size) {
@@ -30,7 +30,6 @@ void recv_all(int sockfd, void *buf, size_t buf_size) {
 		if (cur < 0) err(1, 0);
 		total += cur;
 	}
-	// fprintf(stderr, "server received %zu bytes\n", buf_size);
 }
 
 void rpc_open(int sessfd, char* stub) {
@@ -55,19 +54,15 @@ void rpc_close(int sessfd, char* stub) {
 	// send back the result
 	send_all(sessfd, &res, sizeof(int));
 	// send back errno on failure
-	if (res < 0) {
-		send_all(sessfd, &errno, sizeof(int));
-		fprintf(stderr, "close fd %d failed!\n", fd);
-	} else {
-		fprintf(stderr, "close fd %d succeed!\n", fd);
-	}
+	if (res < 0) send_all(sessfd, &errno, sizeof(int));
 }
 
 void rpc_write(int sessfd, char* stub){
 	int fd = *(int *)(stub + sizeof(int));
 	size_t count = *(size_t *)(stub + 2 * sizeof(int));
-	// fprintf(stderr, "rpc_write %zu bytes to fd %d\n", count, fd);
 	void *buf = stub + 2 * sizeof(int) + sizeof(size_t);
+
+	fprintf(stderr, "rpc_write %zu bytes to fd %d\n", count, fd);
 
 	// perform a local write
 	ssize_t res = write(fd, buf, count);
@@ -81,7 +76,7 @@ void rpc_write(int sessfd, char* stub){
 int main(int argc, char**argv) {
 	char *serverport;
 	unsigned short port;
-	int sockfd, sessfd, rv;
+	int sockfd, rv;
 	struct sockaddr_in srv, cli;
 	socklen_t sa_size;
 	
@@ -107,40 +102,48 @@ int main(int argc, char**argv) {
 	// start listening for connections
 	rv = listen(sockfd, 5);
 	if (rv<0) err(1,0);
-	
-	// main server loop, handle clients one at a time
+
+	// main server loop, handle one client at a time
 	while (true) {
-		
-		// wait for next client, get session socket
+		// connect to a client
 		sa_size = sizeof(struct sockaddr_in);
-		sessfd = accept(sockfd, (struct sockaddr *)&cli, &sa_size);
-		if (sessfd<0) err(1,0);
-		
-		// the first package will alwasy be the package size
-		size_t stub_size;
-		recv_all(sessfd, &stub_size, sizeof(size_t));
+		server_sessfd = accept(sockfd, (struct sockaddr *)&cli, &sa_size);
+		if (server_sessfd<0) err(1,0);
 
-		// receive actual package
-		void *stub = malloc(stub_size);
-		// char stub[stub_size];
-		recv_all(sessfd, stub, stub_size);
+		// fork and handle client in child process
+		pid_t p = fork();
+		if (p == 0) {
+			// child no longer needs listening socket
+			close(sockfd); 
 
-		// get messages and send replies to this client, until it goes away
-		int type = *(int *)stub;
-		if (type == 0)
-			rpc_open(sessfd, stub);
-		else if (type == 1)
-			rpc_close(sessfd, stub);
-		else if (type == 2)
-			rpc_write(sessfd, stub);
+			// handle all RPC calls from the client
+			while (true) {
+				// check package size first
+				size_t stub_size;
+				recv_all(server_sessfd, &stub_size, sizeof(size_t));
 
-		// either client closed connection, or error
-		close(sessfd);
-		// clean up memory
-		free(stub);
+				// receive actual package
+				void *stub = malloc(stub_size);
+				recv_all(server_sessfd, stub, stub_size);
+
+				// get messages and send replies to this client, until it goes away
+				int type = *(int *)stub;
+				if (type == 0)
+					rpc_open(server_sessfd, stub);
+				else if (type == 1)
+					rpc_close(server_sessfd, stub);
+				else if (type == 2)
+					rpc_write(server_sessfd, stub);
+
+				// clean up memory
+				free(stub);
+			}
+		}
+		// parent no longer need connection socket
+		close(server_sessfd);
 	}
 	
-	// fprintf(stderr, "server shutting down cleanly\n");
+	fprintf(stderr, "server shutting down cleanly\n");
 	// close socket
 	close(sockfd);
 
