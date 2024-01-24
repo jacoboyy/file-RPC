@@ -17,6 +17,7 @@
 #include <err.h>
 
 extern int errno;
+int client_sockfd; /* global variable for the connection socket */
 
 // The following line declares a function pointer with the same prototype as the open function.  
 int (*orig_open)(const char *pathname, int flags, ...);  // mode_t mode is needed when flags includes O_CREAT
@@ -71,7 +72,6 @@ void send_all(int sockfd, void *buf, size_t buf_size) {
 		if (cur < 0) err(1, 0);
 		total += cur;
 	}
-	// fprintf(stderr, "client sent %zu bytes\n", buf_size);
 }
 
 void recv_all(int sockfd, void *buf, size_t buf_size) {
@@ -81,7 +81,6 @@ void recv_all(int sockfd, void *buf, size_t buf_size) {
 		if (cur < 0) err(1, 0);
 		total += cur;
 	}
-	// fprintf(stderr, "client received %zu bytes\n", buf_size);
 }
 
 // This is our replacement for the open function from libc.
@@ -98,28 +97,26 @@ int open(const char *pathname, int flags, ...) {
 	fprintf(stderr, "mylib: open called for path %s\n", pathname);
 	
 	// prepare client stub
-	int sockfd = connect2server();
-	// stub = type (int) + flags (int) + m (mode_t) + pathname (string)
-	size_t stub_size = 2 * sizeof(int) + sizeof(mode_t) + strlen(pathname) + 1;
-	void *stub = malloc(stub_size);
-	memcpy(stub, &type, sizeof(int));
-	memcpy(stub + sizeof(int), &flags, sizeof(int));
-	memcpy(stub + 2 * sizeof(int), &m, sizeof(mode_t));
-	memcpy(stub + 2 * sizeof(int) + sizeof(mode_t), pathname, strlen(pathname) + 1);
+	// package = type (int) + flags (int) + m (mode_t) + pathname (string)
+	// stub = package_size (size_t) + package
+	size_t package_size = 2 * sizeof(int) + sizeof(mode_t) + strlen(pathname) + 1;
+	size_t stub_size = sizeof(size_t) + package_size;
 
-	// send package size first
-	send_all(sockfd, &stub_size, sizeof(size_t));
-	// send actual package
-	send_all(sockfd, stub, stub_size);
+	void *stub = malloc(stub_size);
+	memcpy(stub, &package_size, sizeof(size_t));
+	memcpy(stub + sizeof(size_t), &type, sizeof(int));
+	memcpy(stub + sizeof(size_t) + sizeof(int), &flags, sizeof(int));
+	memcpy(stub + sizeof(size_t) + 2 * sizeof(int), &m, sizeof(mode_t));
+	memcpy(stub + sizeof(size_t) + 2 * sizeof(int) + sizeof(mode_t), pathname, strlen(pathname) + 1);
+
+	// send entire stub
+	send_all(client_sockfd, stub, stub_size);
 
 	// receive client reply
 	int fd;
-	recv_all(sockfd, &fd, sizeof(int));
-	fprintf(stderr, "remote fd is %d\n", fd);
-	if (fd < 0) recv_all(sockfd, &errno, sizeof(int)); // set errno on failure
+	recv_all(client_sockfd, &fd, sizeof(int));
+	if (fd < 0) recv_all(client_sockfd, &errno, sizeof(int)); // set errno on failure
 
-	// close the connection socket
-	orig_close(sockfd);
 	// clean up memory
 	free(stub);
 
@@ -129,31 +126,23 @@ int open(const char *pathname, int flags, ...) {
 int close(int fd) {
 	fprintf(stderr, "mylib: close remote fd %d\n", fd);
 	
-	int sockfd = connect2server();
-
 	// prepare client stub
 	int type = 1;
-	// sub = type (int) + fd (int)
-	size_t stub_size = 2 * sizeof(int);
+	// package = type (int) + fd (int)
+	// stub = package_size (size_t) + package
+	size_t package_size = 2 * sizeof(int);
+	size_t stub_size = sizeof(size_t) + package_size;
 	char stub[stub_size];
-	memcpy(stub, &type, sizeof(int));
-	memcpy(stub + sizeof(int), &fd, sizeof(int));
+	memcpy(stub, &package_size, sizeof(size_t));
+	memcpy(stub + sizeof(size_t), &type, sizeof(int));
+	memcpy(stub + sizeof(size_t) + sizeof(int), &fd, sizeof(int));
 	
-	// send package size before actual package
-	send_all(sockfd, &stub_size, sizeof(size_t));
-	send_all(sockfd, stub, stub_size);
+	// send stub package
+	send_all(client_sockfd, stub, stub_size);
 
 	int res;
-	recv_all(sockfd, &res, sizeof(int));
-	if (res < 0) {
-		recv_all(sockfd, &errno, sizeof(int)); // set errno on failure
-		fprintf(stderr, "close fd %d failed!\n", fd);
-	} else {
-		fprintf(stderr, "close fd %d succeed!\n", fd);
-	}
-
-	// close connection socket
-	orig_close(sockfd);
+	recv_all(client_sockfd, &res, sizeof(int));
+	if (res < 0) recv_all(client_sockfd, &errno, sizeof(int)); // set errno on failure
 
 	return res;
 }
@@ -164,32 +153,29 @@ ssize_t read(int fd, void *buf, size_t count) {
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {
-	// fprintf(stderr, "mylib: try to write %zu bytes to file descriptor %d\n", count, fd);
+	fprintf(stderr, "mylib: try to write %zu bytes to file descriptor %d\n", count, fd);
 
-	int sockfd = connect2server();
 	int type = 2;
 	// stub = type (int) + fd (int) + count (size_t) + buf (count)
-	size_t stub_size = 2 * sizeof(int) + sizeof(size_t) + count;
+	size_t package_size = 2 * sizeof(int) + sizeof(size_t) + count;
+	size_t stub_size = sizeof(size_t) + package_size;
 	void *stub = malloc(stub_size);
 
-	memcpy(stub, &type, sizeof(int));
-	memcpy(stub + sizeof(int), &fd, sizeof(int));
-	memcpy(stub + 2 * sizeof(int), &count, sizeof(size_t));
-	memcpy(stub + 2 * sizeof(int) + sizeof(size_t), buf, count);
+	memcpy(stub, &package_size, sizeof(size_t));
+	memcpy(stub + sizeof(size_t), &type, sizeof(int));
+	memcpy(stub + sizeof(size_t) + sizeof(int), &fd, sizeof(int));
+	memcpy(stub + sizeof(size_t) + 2 * sizeof(int), &count, sizeof(size_t));
+	memcpy(stub + 2 * sizeof(size_t) + 2 * sizeof(int), buf, count);
 	
-	// send package size first
-	send_all(sockfd, &stub_size, sizeof(size_t));
-	// send actual package
-	send_all(sockfd, stub, stub_size);
+	// send stub package
+	send_all(client_sockfd, stub, stub_size);
 
 	// recv number of bytes
 	ssize_t write_size;
-	recv_all(sockfd, &write_size, sizeof(ssize_t));
+	recv_all(client_sockfd, &write_size, sizeof(ssize_t));
 	// set errno on failure
-	if (write_size < 0) recv_all(sockfd, &errno, sizeof(int));
+	if (write_size < 0) recv_all(client_sockfd, &errno, sizeof(int));
 
-	// close connection socket
-	orig_close(sockfd);
 	// clean up memory
 	free(stub);
 	
@@ -237,7 +223,9 @@ void _init(void) {
 	orig_getdirtree = dlsym(RTLD_NEXT, "getdirtree");
 	orig_freedirtree = dlsym(RTLD_NEXT, "reedirtree");
 
-	// fprintf(stderr, "Init mylib\n");
+	fprintf(stderr, "Init mylib\n");
+	// connect to the server
+	client_sockfd = connect2server();
 }
 
 
