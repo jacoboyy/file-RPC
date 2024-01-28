@@ -15,6 +15,7 @@
 #include "dirtree.h"
 #include "util.h"
 
+/** Global variables **/
 extern int errno;
 int server_sessfd; 	   /* global variable for connection socket */
 int serialize_pos = 0; /* position in the current tree buffer used in tree serialization */
