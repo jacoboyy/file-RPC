@@ -2,76 +2,266 @@
 #include <stdlib.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
-#include <netinet/in.h>
+#include <sys/stat.h>
+#include <sys/errno.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <string.h>
 #include <unistd.h>
 #include <err.h>
 #include <stdbool.h>
-#include <sys/errno.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include "dirtree.h"
+#include "util.h"
 
 extern int errno;
 int server_sessfd; /* global variable for connection socket */
-
-void send_all(int sockfd, void *buf, size_t buf_size) {
-	size_t total = 0;
-	while (total < buf_size) {
-		ssize_t cur = send(sockfd, buf + total, buf_size - total, 0);
-		if (cur < 0) err(1, 0);
-		total += cur;
-	}
-}
-
-void recv_all(int sockfd, void *buf, size_t buf_size) {
-	size_t total = 0;
-	while (total < buf_size) {
-		ssize_t cur = recv(sockfd, buf + total, buf_size - total, 0);
-		if (cur < 0) err(1, 0);
-		total += cur;
-	}
-}
+int serialize_pos = 0; /* position in the current tree buffer used during tree serialization */
 
 void rpc_open(int sessfd, char* stub) {
-	int flags = *(int *)(stub + sizeof(int));
-	mode_t mode = *(mode_t *)(stub + 2 * sizeof(int));
-	char *pathname = stub + 2 * sizeof(int) + sizeof(mode_t);
+	int flags = *(int *)(stub + INT_SIZE);
+	mode_t mode = *(mode_t *)(stub + 2 * INT_SIZE);
+	char *pathname = (char *)(stub + 2 * INT_SIZE + sizeof(mode_t));
 	
 	// perform a local open
 	int fd = open(pathname, flags, mode);
 	fprintf(stderr, "rpc_open file %s and fd is %d\n", pathname, fd);
-	// send back the file descriptor
-	send_all(sessfd, &fd, sizeof(int));
-	// send back errno on failure
-	if (fd < 0) send_all(sessfd, &errno, sizeof(int));
+
+	if (fd < 0) {
+		// send back errno on failure
+		int reply_buf[2] = {fd, errno};
+		send_all(sessfd, (void *)reply_buf, 2 * INT_SIZE);
+	} else {
+		// add offset to distinguish between local and remote fds on the client side
+		int fd_client = fd + OFFSET; 
+		send_all(sessfd, &fd_client, INT_SIZE);
+	}
 }
 
 void rpc_close(int sessfd, char* stub) {
-	int fd = *(int *)(stub + sizeof(int));
+	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
 	fprintf(stderr, "rpc_close called for remote fd %d\n", fd);
 	// perform a local close
 	int res = close(fd);
-	// send back the result
-	send_all(sessfd, &res, sizeof(int));
-	// send back errno on failure
-	if (res < 0) send_all(sessfd, &errno, sizeof(int));
+
+	// send back result
+	if (res == 0)
+		send_all(sessfd, &res, INT_SIZE);
+	else {
+		// send back errno on failure
+		int reply_buf[2] = {res, errno};
+		send_all(sessfd, (void *)reply_buf, 2 * INT_SIZE);
+	}
 }
 
-void rpc_write(int sessfd, char* stub){
-	int fd = *(int *)(stub + sizeof(int));
-	size_t count = *(size_t *)(stub + 2 * sizeof(int));
-	void *buf = stub + 2 * sizeof(int) + sizeof(size_t);
-
-	fprintf(stderr, "rpc_write %zu bytes to fd %d\n", count, fd);
+void rpc_write(int sessfd, char* stub) {
+	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
+	size_t count = *(size_t *)(stub + 2 * INT_SIZE);
+	void *buf = stub + 2 * INT_SIZE + SIZET_SIZE;
 
 	// perform a local write
+	fprintf(stderr, "rpc_write %zu bytes to remote fd %d\n", count, fd);
 	ssize_t res = write(fd, buf, count);
 
 	// send back results
-	send_all(sessfd, &res, sizeof(ssize_t));
-	// send back errno on failure
-	if (res < 0) send_all(sessfd, &errno, sizeof(int));
+	if (res >= 0) 
+		send_all(sessfd, &res, SSIZET_SIZE);
+	else {
+		// also send back errno on failure
+		size_t reply_size = SSIZET_SIZE + INT_SIZE;
+		void *reply_buf = malloc(reply_size);
+		memcpy(reply_buf, &res, SSIZET_SIZE);
+		memcpy(reply_buf + SSIZET_SIZE, &errno, INT_SIZE);
+		send_all(sessfd, reply_buf, reply_size);
+		free(reply_buf);
+	}
 }
+
+void rpc_read(int sessfd, void* stub) {
+	// unmarshall
+	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
+	size_t count = *(size_t *)(stub + 2 * INT_SIZE);
+	void *read_buf = malloc(count);
+
+	fprintf(stderr, "rpc_read %zu bytes from fd %d\n", count, fd);
+
+	// perform a local read
+	ssize_t res = read(fd, read_buf, count);
+
+	// send back errno on failture, otherwise actual contents read
+	size_t reply_size = res < 0 ? SSIZET_SIZE + INT_SIZE : SSIZET_SIZE + res;
+	void *reply_buf = malloc(reply_size);
+	memcpy(reply_buf, &res, SSIZET_SIZE);
+	if (res < 0) 
+		memcpy(reply_buf + SSIZET_SIZE, &errno, INT_SIZE);
+	else 
+		memcpy(reply_buf + SSIZET_SIZE, read_buf, res);
+	send_all(sessfd, reply_buf, reply_size);
+	
+	// clean up memory
+	free(reply_buf);
+	free(read_buf); 
+}
+
+void rpc_lseek(int sessfd, void* stub) {
+	// unmarsall
+	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
+	off_t offset = *(off_t *)(stub + 2 * INT_SIZE);
+	int whence = *(int *)(stub + 2 * INT_SIZE + OFFT_SIZE);
+
+	// perform a local lseek
+	fprintf(stderr, "rpc_lseek called on remote fd %d with offset %zd\n", fd, offset);
+	off_t res = lseek(fd, offset, whence);
+
+	// send back rpc result
+	if (res >= 0)
+		send_all(sessfd, &res, OFFT_SIZE);
+	else {
+		// send back errno on failure
+		size_t reply_size = OFFT_SIZE + INT_SIZE;
+		void *reply_buf = malloc(reply_size);
+		memcpy(reply_buf, &res, OFFT_SIZE);
+		memcpy(reply_buf + OFFT_SIZE, &errno, INT_SIZE);
+		send_all(sessfd, reply_buf, reply_size);
+		free(reply_buf);
+	}
+}
+
+void rpc_stat(int sessfd, void* stub) {
+	// unmarshall
+	char *pathname = (char *)(stub + INT_SIZE);
+	struct stat *statbuf = (struct stat *)malloc(sizeof(struct stat));
+	
+	// perform local call
+	fprintf(stderr, "rpc_stat called on path %s\n", pathname);
+	int res = stat(pathname, statbuf);
+
+	// send back result
+	size_t reply_size = res < 0 ? 2 * INT_SIZE : INT_SIZE + sizeof(struct stat);
+	void *reply_buf = malloc(reply_size);
+	memcpy(reply_buf, &res, INT_SIZE);
+	if (res < 0) 
+		memcpy(reply_buf + INT_SIZE, &errno, INT_SIZE);
+	else 
+		memcpy(reply_buf + INT_SIZE, statbuf, sizeof(struct stat));
+	send_all(sessfd, reply_buf, reply_size);
+
+	// clean up memory
+	free(statbuf);
+	free(reply_buf);
+}
+
+void rpc_unlink(int sessfd, void* stub) {
+	// unmarshall
+	char *pathname = (char *)(stub + INT_SIZE);
+	
+	// perform local call
+	fprintf(stderr, "rpc_unlink called on path %s\n", pathname);
+	int res = unlink(pathname);
+
+	// send back result
+	if (res == 0)
+		send_all(sessfd, &res, INT_SIZE);
+	else {
+		// send back errno on failure
+		int reply_buf[2] = {res, errno};
+		send_all(sessfd, (void *)reply_buf, 2 * INT_SIZE);
+	}
+}
+
+void rpc_getdirentries(int sessfd, void* stub) {
+	// unmarshall
+	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
+	size_t nbytes = *(size_t *)(stub + 2 * INT_SIZE);
+	off_t *basep = malloc(OFFT_SIZE);
+	*basep = *(off_t *)(stub + 2 * INT_SIZE + SIZET_SIZE);
+	char *buf = (char *)malloc(nbytes);
+	
+	// perform local fuction call
+	fprintf(stderr, "rpc_getdirentries called on fd %d for %zu byes at offset %zu\n", fd, nbytes, *basep);
+	ssize_t res = getdirentries(fd, buf, nbytes, basep);
+	fprintf(stderr, "rpc_getdirentries read %zd bytes and the new offset is %zd\n", res, *basep);
+
+	// prepare reply buffer
+	size_t reply_size = res < 0 ? SSIZET_SIZE + INT_SIZE : SSIZET_SIZE + res + OFFT_SIZE;
+	void *reply_buf = malloc(reply_size);
+	memcpy(reply_buf, &res, SSIZET_SIZE);
+	if (res < 0)
+		memcpy(reply_buf + SSIZET_SIZE, &errno, INT_SIZE);
+	else {
+		memcpy(reply_buf + SSIZET_SIZE, buf, res);
+		memcpy(reply_buf + SSIZET_SIZE + res, basep, OFFT_SIZE);
+	}
+	// send back result
+	send_all(sessfd, reply_buf, reply_size);
+
+	// clean up memory
+	free(reply_buf);
+	free(basep);
+	free(buf);
+}
+
+size_t get_tree_size(struct dirtreenode* tree){
+	if (tree == NULL) 
+		return 0;
+	// current node size
+	size_t size = 2 * INT_SIZE + strlen(tree->name) + 1;
+	// recursively get the subnodes size
+    for (int idx = 0; idx < tree->num_subdirs; idx++) {
+        size += get_tree_size(tree->subdirs[idx]);
+    }
+    return size;
+}
+
+void serialize(void *buf, struct dirtreenode *tree){
+    // copy name length
+    int name_length = strlen(tree->name) + 1;
+    memcpy(buf + serialize_pos, &name_length, INT_SIZE);
+	serialize_pos += INT_SIZE;
+    // copy subdirs size
+    memcpy(buf + serialize_pos, &(tree->num_subdirs), INT_SIZE);
+	serialize_pos += INT_SIZE;
+    // copy name
+    memcpy(buf + serialize_pos, tree->name, name_length);
+    serialize_pos += name_length;
+	// recursion
+    for (int idx = 0; idx < tree->num_subdirs; idx++) {
+        serialize(buf, tree->subdirs[idx]);
+    }
+}
+
+void rpc_getdirtree(int sessfd, void* stub) {
+	//unmarshall
+	char *path = (char *)(stub + INT_SIZE);
+
+	// perform local getdirtree
+	fprintf(stderr, "rpc_getdirtree called on path %s\n", path);
+	struct dirtreenode *tree = getdirtree(path);
+
+	// get size of the tree to prepare buffer
+	size_t tree_size = get_tree_size(tree);
+	// prepare reply
+	size_t reply_size = tree_size == 0 ? SIZET_SIZE + INT_SIZE : SIZET_SIZE + tree_size;
+	void *reply_buf = malloc(reply_size);
+	memcpy(reply_buf, &tree_size, SIZET_SIZE);
+	// getdirtree failed, send back errno
+	if (tree_size == 0) 
+		memcpy(reply_buf + SIZET_SIZE, &errno, INT_SIZE);
+	else {
+		// reset buffer pointer position and serialize the tree
+		serialize_pos = 0;
+		serialize(reply_buf + SIZET_SIZE, tree);		
+	}
+	// send back reply
+	send_all(sessfd, reply_buf, reply_size);
+	free(reply_buf); // clean up memory
+
+	// dirtree no longer needed on the server side
+	if (tree_size > 0)
+		freedirtree(tree); 
+}
+
 
 int main(int argc, char**argv) {
 	char *serverport;
@@ -120,7 +310,7 @@ int main(int argc, char**argv) {
 			while (true) {
 				// check package size first
 				size_t stub_size;
-				recv_all(server_sessfd, &stub_size, sizeof(size_t));
+				recv_all(server_sessfd, &stub_size, SIZET_SIZE);
 
 				// receive actual package
 				void *stub = malloc(stub_size);
@@ -128,13 +318,41 @@ int main(int argc, char**argv) {
 
 				// get messages and send replies to this client, until it goes away
 				int type = *(int *)stub;
-				if (type == 0)
-					rpc_open(server_sessfd, stub);
-				else if (type == 1)
-					rpc_close(server_sessfd, stub);
-				else if (type == 2)
-					rpc_write(server_sessfd, stub);
-
+				switch (type) {
+					case 0:
+						rpc_open(server_sessfd, stub);
+						break;
+					case 1:
+						rpc_close(server_sessfd, stub);
+						break;
+					case 2:
+						rpc_write(server_sessfd, stub);
+						break;
+					case 3:
+						rpc_read(server_sessfd, stub);
+						break;
+					case 4:
+						rpc_lseek(server_sessfd, stub);
+						break;
+					case 5:
+						rpc_stat(server_sessfd, stub);
+						break;
+					case 6:
+						rpc_unlink(server_sessfd, stub);
+						break;
+					case 7:
+						rpc_getdirentries(server_sessfd, stub);
+						break;
+					case 8:
+						rpc_getdirtree(server_sessfd, stub);
+						break;
+					case 9:
+						// terminate child server
+						fprintf(stderr, "terminate child server\n");
+						exit(0);
+					default:
+						fprintf(stderr, "operation not defined");
+				}				
 				// clean up memory
 				free(stub);
 			}
