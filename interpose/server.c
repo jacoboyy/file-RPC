@@ -16,10 +16,16 @@
 #include "util.h"
 
 extern int errno;
-int server_sessfd; /* global variable for connection socket */
-int serialize_pos = 0; /* position in the current tree buffer used during tree serialization */
+int server_sessfd; 	   /* global variable for connection socket */
+int serialize_pos = 0; /* position in the current tree buffer used in tree serialization */
 
+/**
+ * @brief Perform a local open and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_open(int sessfd, char* stub) {
+	// unmarshall
 	int flags = *(int *)(stub + INT_SIZE);
 	mode_t mode = *(mode_t *)(stub + 2 * INT_SIZE);
 	char *pathname = (char *)(stub + 2 * INT_SIZE + sizeof(mode_t));
@@ -39,7 +45,13 @@ void rpc_open(int sessfd, char* stub) {
 	}
 }
 
+/**
+ * @brief Perform a local close and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_close(int sessfd, char* stub) {
+	// unmarshall, need to offset the file descriptor
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
 	fprintf(stderr, "rpc_close called for remote fd %d\n", fd);
 	// perform a local close
@@ -55,7 +67,13 @@ void rpc_close(int sessfd, char* stub) {
 	}
 }
 
+/**
+ * @brief Perform local write and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_write(int sessfd, char* stub) {
+	// unmarshall, need to offset the file descriptor
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
 	size_t count = *(size_t *)(stub + 2 * INT_SIZE);
 	void *buf = stub + 2 * INT_SIZE + SIZET_SIZE;
@@ -78,6 +96,11 @@ void rpc_write(int sessfd, char* stub) {
 	}
 }
 
+/**
+ * @brief Perform local read and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_read(int sessfd, void* stub) {
 	// unmarshall
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
@@ -104,8 +127,13 @@ void rpc_read(int sessfd, void* stub) {
 	free(read_buf); 
 }
 
+/**
+ * @brief Perform local lseek and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_lseek(int sessfd, void* stub) {
-	// unmarsall
+	// unmarsall and offset file descriptor
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
 	off_t offset = *(off_t *)(stub + 2 * INT_SIZE);
 	int whence = *(int *)(stub + 2 * INT_SIZE + OFFT_SIZE);
@@ -128,6 +156,11 @@ void rpc_lseek(int sessfd, void* stub) {
 	}
 }
 
+/**
+ * @brief Perform local stat call and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_stat(int sessfd, void* stub) {
 	// unmarshall
 	char *pathname = (char *)(stub + INT_SIZE);
@@ -152,6 +185,11 @@ void rpc_stat(int sessfd, void* stub) {
 	free(reply_buf);
 }
 
+/**
+ * @brief Perform local unlink call and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_unlink(int sessfd, void* stub) {
 	// unmarshall
 	char *pathname = (char *)(stub + INT_SIZE);
@@ -170,6 +208,11 @@ void rpc_unlink(int sessfd, void* stub) {
 	}
 }
 
+/**
+ * @brief Perform local getdirentries call and send back result to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_getdirentries(int sessfd, void* stub) {
 	// unmarshall
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
@@ -202,6 +245,11 @@ void rpc_getdirentries(int sessfd, void* stub) {
 	free(buf);
 }
 
+/**
+ * @brief Get the size in bytes of the serialized dirtreenode recusively
+ * @param[in] tree a pointer to a dirtreenode
+ * @return the size of the serialized dirtreenode
+ */
 size_t get_tree_size(struct dirtreenode* tree){
 	if (tree == NULL) 
 		return 0;
@@ -214,6 +262,13 @@ size_t get_tree_size(struct dirtreenode* tree){
     return size;
 }
 
+/**
+ * @brief Recursively serialize a dirtreenode struct using pre-order traversal.
+ * Each serialized tree node contains the strlen of the node name, the number
+ * of subdirs and the actual node name.
+ * @param[in] tree  a pointer to the dirtreenode to be serialized
+ * @param[out] buf  memory block containing the serialized tree
+ */
 void serialize(void *buf, struct dirtreenode *tree){
     // copy name length
     int name_length = strlen(tree->name) + 1;
@@ -231,15 +286,20 @@ void serialize(void *buf, struct dirtreenode *tree){
     }
 }
 
+/**
+ * @brief Perform local getdirtree call and send back the serialized dirtreenode to client
+ * @param[in] sessfd  a TCP connection socket
+ * @param[in] stub	  client package with serialized function arguments
+ */
 void rpc_getdirtree(int sessfd, void* stub) {
-	//unmarshall
+	// unmarshall
 	char *path = (char *)(stub + INT_SIZE);
 
 	// perform local getdirtree
 	fprintf(stderr, "rpc_getdirtree called on path %s\n", path);
 	struct dirtreenode *tree = getdirtree(path);
 
-	// get size of the tree to prepare buffer
+	// get size of the tree to prepare memory buffer
 	size_t tree_size = get_tree_size(tree);
 	// prepare reply
 	size_t reply_size = tree_size == 0 ? SIZET_SIZE + INT_SIZE : SIZET_SIZE + tree_size;
@@ -316,43 +376,33 @@ int main(int argc, char**argv) {
 				void *stub = malloc(stub_size);
 				recv_all(server_sessfd, stub, stub_size);
 
-				// get messages and send replies to this client, until it goes away
-				int type = *(int *)stub;
-				switch (type) {
-					case 0:
-						rpc_open(server_sessfd, stub);
-						break;
-					case 1:
-						rpc_close(server_sessfd, stub);
-						break;
-					case 2:
-						rpc_write(server_sessfd, stub);
-						break;
-					case 3:
-						rpc_read(server_sessfd, stub);
-						break;
-					case 4:
-						rpc_lseek(server_sessfd, stub);
-						break;
-					case 5:
-						rpc_stat(server_sessfd, stub);
-						break;
-					case 6:
-						rpc_unlink(server_sessfd, stub);
-						break;
-					case 7:
-						rpc_getdirentries(server_sessfd, stub);
-						break;
-					case 8:
-						rpc_getdirtree(server_sessfd, stub);
-						break;
-					case 9:
-						// terminate child server
-						fprintf(stderr, "terminate child server\n");
-						exit(0);
-					default:
-						fprintf(stderr, "operation not defined");
-				}				
+				// check operation and perform local call accordingly
+				int operation = *(int *)stub;
+				if (operation == OPEN)
+					rpc_open(server_sessfd, stub);
+				else if (operation == CLOSE)
+					rpc_close(server_sessfd, stub);
+				else if (operation == WRITE)
+					rpc_write(server_sessfd, stub);
+				else if (operation == READ)
+					rpc_read(server_sessfd, stub);
+				else if (operation == LSEEK)
+					rpc_lseek(server_sessfd, stub);
+				else if (operation == STAT)
+					rpc_stat(server_sessfd, stub);
+				else if (operation == UNLINK)
+					rpc_unlink(server_sessfd, stub);
+				else if (operation == GETDIRENTRIES)
+					rpc_getdirentries(server_sessfd, stub);
+				else if (operation == GETDIRTREE)
+					rpc_getdirtree(server_sessfd, stub);
+				else if (operation == CLOSE_CONNECTION) {
+					// terminate child server
+					fprintf(stderr, "terminate child server\n");
+					exit(0);
+				} else
+					err(1, 0); // unsupported operation
+
 				// clean up memory
 				free(stub);
 			}
@@ -362,7 +412,7 @@ int main(int argc, char**argv) {
 	}
 	
 	fprintf(stderr, "server shutting down cleanly\n");
-	// close socket
+	// close listening socket
 	close(sockfd);
 
 	return 0;
