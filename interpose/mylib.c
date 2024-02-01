@@ -108,8 +108,6 @@ int open(const char *pathname, int flags, ...) {
 	if (fd < 0) 
 		recv_all(client_sockfd, &errno, INT_SIZE); // set errno on failure
 
-	fprintf(stderr, "mylib: open called for path %s and remote fd is %d\n", pathname, fd - OFFSET);
-
 	return fd;
 }
 
@@ -121,8 +119,6 @@ int close(int fd) {
 	// check if local close
 	if (fd < OFFSET) 
 		return orig_close(fd);
-	
-	fprintf(stderr, "mylib: close remote fd %d\n", fd - OFFSET);
 	
 	// package = operation (int) + fd (int)
 	size_t package_size = 2 * INT_SIZE;
@@ -152,8 +148,6 @@ ssize_t write(int fd, const void *buf, size_t count) {
 	// check if local close
 	if (fd < OFFSET) 
 		return orig_write(fd, buf, count);
-
-	fprintf(stderr, "mylib: write %zu bytes to remote file descriptor %d\n", count, fd - OFFSET);
 
 	// package = operation (int) + fd (int) + count (size_t) + buf (count)
 	size_t package_size = 2 * INT_SIZE + SIZET_SIZE + count;
@@ -188,8 +182,6 @@ ssize_t read(int fd, void *buf, size_t count) {
 	if (fd < OFFSET)
 		return orig_read(fd, buf, count);
 
-	fprintf(stderr, "mylib: read %zu bytes from file descriptor %d\n", count, fd - OFFSET);
-
 	// prepare client stub
 	// package = operation (int) + fd (int) + count (size_t)
 	size_t package_size = 2 * INT_SIZE + SIZET_SIZE;
@@ -221,8 +213,6 @@ off_t lseek(int fd, off_t offset, int whence) {
 	// check if local lseek
 	if (fd < OFFSET)
 		return orig_lseek(fd, offset, whence);
-
-	fprintf(stderr, "mylib: lseek called on remote fd %d with offset %zd\n", fd - OFFSET, offset);
 	
 	// prepare client stub
 	// package = operation (int) + fd (int) + offset (off_t) + whence (int)
@@ -254,7 +244,6 @@ off_t lseek(int fd, off_t offset, int whence) {
  * @return	0 on success, -1 if an error occurs
  */
 int stat(const char *pathname, struct stat *statbuf) {
-	fprintf(stderr, "mylib: stat called on path %s\n", pathname);
 	// prepare client stub
 	// package = operation (int) + pathname (string)
 	size_t package_size = INT_SIZE + strlen(pathname) + 1;
@@ -284,7 +273,6 @@ int stat(const char *pathname, struct stat *statbuf) {
  * @return	0 on success, -1 if an error occurs
  */
 int unlink(const char *pathname) {
-	fprintf(stderr, "mylib: unlink called on path %s\n", pathname);
 	// prepare client stub
 	// package = operation (int) + pathname (string)
 	size_t package_size = INT_SIZE + strlen(pathname) + 1;
@@ -318,7 +306,6 @@ ssize_t getdirentries(int fd, char *buf, size_t nbytes, off_t *basep) {
 	if (fd < OFFSET)
 		return orig_getdirentries(fd, buf, nbytes, basep);
 
-	fprintf(stderr, "mylib: getdirentries called on fd %d for %zu byes at offset %zu\n", fd - OFFSET, nbytes, *basep);
 	// prepare client stub
 	// package = operation (int) + fd (int) + nbytes (size_t) + *basep (off_t)
 	size_t package_size = 2 * INT_SIZE + SIZET_SIZE + OFFT_SIZE;
@@ -347,7 +334,6 @@ ssize_t getdirentries(int fd, char *buf, size_t nbytes, off_t *basep) {
 		*basep = *(off_t *)(reply + res);
 		free(reply);
 	}
-	fprintf(stderr, "getdirentries read %zd bytes and the new offset is %zd\n", res, *basep);
 	return res;
 }
 
@@ -383,7 +369,6 @@ struct dirtreenode* deserialize(void *buf) {
  * @return	a pointer to the tree root, NULL if an error occurs
  */
 struct dirtreenode* getdirtree(const char *path) {
-	fprintf(stderr, "mylib: getdirtree called on path %s\n", path);
 	// package = operation (int) + path (string)
 	size_t package_size = INT_SIZE + strlen(path) + 1;
 	size_t stub_size = SIZET_SIZE + package_size;
@@ -435,8 +420,6 @@ void freedirtree(struct dirtreenode* dt) {
  * the child server process, invoked before the client exits
  */
 void close_connection() {
-	fprintf(stderr, "client send signal to terminate child server\n");
-	
 	// package = operation (int)
 	size_t package_size = INT_SIZE;
 	size_t stub_size = SIZET_SIZE + INT_SIZE;

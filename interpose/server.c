@@ -33,7 +33,6 @@ void rpc_open(int sessfd, char* stub) {
 	
 	// perform a local open
 	int fd = open(pathname, flags, mode);
-	fprintf(stderr, "rpc_open file %s and fd is %d\n", pathname, fd);
 
 	if (fd < 0) {
 		// send back errno on failure
@@ -54,7 +53,6 @@ void rpc_open(int sessfd, char* stub) {
 void rpc_close(int sessfd, char* stub) {
 	// unmarshall, need to offset the file descriptor
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
-	fprintf(stderr, "rpc_close called for remote fd %d\n", fd);
 	// perform a local close
 	int res = close(fd);
 
@@ -80,7 +78,6 @@ void rpc_write(int sessfd, char* stub) {
 	void *buf = stub + 2 * INT_SIZE + SIZET_SIZE;
 
 	// perform a local write
-	fprintf(stderr, "rpc_write %zu bytes to remote fd %d\n", count, fd);
 	ssize_t res = write(fd, buf, count);
 
 	// send back results
@@ -107,8 +104,6 @@ void rpc_read(int sessfd, void* stub) {
 	int fd = *(int *)(stub + INT_SIZE) - OFFSET;
 	size_t count = *(size_t *)(stub + 2 * INT_SIZE);
 	void *read_buf = malloc(count);
-
-	fprintf(stderr, "rpc_read %zu bytes from fd %d\n", count, fd);
 
 	// perform a local read
 	ssize_t res = read(fd, read_buf, count);
@@ -140,7 +135,6 @@ void rpc_lseek(int sessfd, void* stub) {
 	int whence = *(int *)(stub + 2 * INT_SIZE + OFFT_SIZE);
 
 	// perform a local lseek
-	fprintf(stderr, "rpc_lseek called on remote fd %d with offset %zd\n", fd, offset);
 	off_t res = lseek(fd, offset, whence);
 
 	// send back rpc result
@@ -168,7 +162,6 @@ void rpc_stat(int sessfd, void* stub) {
 	struct stat *statbuf = (struct stat *)malloc(sizeof(struct stat));
 	
 	// perform local call
-	fprintf(stderr, "rpc_stat called on path %s\n", pathname);
 	int res = stat(pathname, statbuf);
 
 	// send back result
@@ -196,7 +189,6 @@ void rpc_unlink(int sessfd, void* stub) {
 	char *pathname = (char *)(stub + INT_SIZE);
 	
 	// perform local call
-	fprintf(stderr, "rpc_unlink called on path %s\n", pathname);
 	int res = unlink(pathname);
 
 	// send back result
@@ -223,9 +215,7 @@ void rpc_getdirentries(int sessfd, void* stub) {
 	char *buf = (char *)malloc(nbytes);
 	
 	// perform local fuction call
-	fprintf(stderr, "rpc_getdirentries called on fd %d for %zu byes at offset %zu\n", fd, nbytes, *basep);
 	ssize_t res = getdirentries(fd, buf, nbytes, basep);
-	fprintf(stderr, "rpc_getdirentries read %zd bytes and the new offset is %zd\n", res, *basep);
 
 	// prepare reply buffer
 	size_t reply_size = res < 0 ? SSIZET_SIZE + INT_SIZE : SSIZET_SIZE + res + OFFT_SIZE;
@@ -297,7 +287,6 @@ void rpc_getdirtree(int sessfd, void* stub) {
 	char *path = (char *)(stub + INT_SIZE);
 
 	// perform local getdirtree
-	fprintf(stderr, "rpc_getdirtree called on path %s\n", path);
 	struct dirtreenode *tree = getdirtree(path);
 
 	// get size of the tree to prepare memory buffer
@@ -399,7 +388,7 @@ int main(int argc, char**argv) {
 					rpc_getdirtree(server_sessfd, stub);
 				else if (operation == CLOSE_CONNECTION) {
 					// terminate child server
-					fprintf(stderr, "terminate child server\n");
+					close(server_sessfd);
 					exit(0);
 				} else
 					err(1, 0); // unsupported operation
@@ -412,7 +401,6 @@ int main(int argc, char**argv) {
 		close(server_sessfd);
 	}
 	
-	fprintf(stderr, "server shutting down cleanly\n");
 	// close listening socket
 	close(sockfd);
 
