@@ -1,3 +1,9 @@
+/**
+ * @file   util.h
+ * @brief  common utility function used by both the client and server
+ * @author Tengda Wang <tengdaw@andrew.cmu.edu>
+ */
+
 /** Constants **/
 #define OFFSET 100000               /* file descriptor offset for RPC */
 #define INT_SIZE sizeof(int)        /* size of int type */ 
