@@ -15,3 +15,8 @@ server: server.c util.o
 clean:
 	rm -f *.o *.so server
 
+.PHONY: format
+format:
+	# clang-format all the source code files
+	find *.c | sed 's| |\\ |g' | xargs clang-format -style=google -i
+
